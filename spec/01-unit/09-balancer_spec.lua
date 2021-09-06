@@ -3,6 +3,18 @@ local mocker = require "spec.fixtures.mocker"
 
 local ws_id = utils.uuid()
 
+local table_clear = require "table.clear"
+local function table_merge(a, b, ...)
+  if not b then
+    return a
+  end
+
+  for k, v in pairs(b) do
+    a[k] = v
+  end
+  return table_merge(a, ...)
+end
+
 local function setup_it_block(consistency)
   local cache_table = {}
 
@@ -542,6 +554,240 @@ for _, consistency in ipairs({"strict", "eventual"}) do
         assert.same(nil, data[3])
       end)
     end)
+
+    local upstream_index = 0
+    for _, algorithm in ipairs{ "consistent-hashing", "least-connections", "round-robin" } do
+
+      local function new_balancer(addresses, target)
+        setup_it_block(consistency)
+
+        upstream_index = upstream_index + 1
+        local upname="upstream_" .. upstream_index
+        local hc_defaults = UPSTREAMS_FIXTURES[1].healthchecks
+        local my_upstream = { id=upname, name=upname, ws_id=ws_id, slots=10, healthchecks=hc_defaults, algorithm=algorithm }
+        local b = assert(balancers.create_balancer(my_upstream, true))
+
+        local first_addr = addresses and addresses[1]
+        local hostname, port = first_addr, 80
+        if type(first_addr) == "table" then
+          hostname = first_addr.address or first_addr.target
+          port = first_addr.port
+        end
+        print("hostname: ", hostname)
+
+        local t = table_merge({
+          upstream = upname,
+          balancer = b,
+          name = hostname or "nowhere.moc",
+          addresses = {},
+          port = port,
+          weight = 100,
+          totalWeight = 0,
+          unavailableWeight = 0,
+        }, target)
+        table.insert(b.targets, t)
+
+        for _, host in ipairs (addresses or {}) do
+          local entry = type(host) == "string" and { address = host } or host
+          assert(b:addAddress(t, entry))
+        end
+        return b
+      end
+
+      describe("[ #tmp " .. algorithm .."]", function()
+        local dnsA
+        setup(function()
+          package.loaded["resty.dns.client"] = nil
+          local dns_client = require "resty.dns.client"
+          dns_client.init()
+          --local dns_client = require "kong.tools.dns"()
+          local dns_helpers = require "spec.helpers.dns"
+          function dnsA(...) return dns_helpers.dnsA(dns_client, ...) end
+        end)
+
+        describe("health", function()
+          it("empty balancer is unhealthy", function()
+            local my_balancer = new_balancer()
+            assert.is_false((my_balancer:getStatus().healthy))
+          end)
+
+          it("adding first address marks healthy", function()
+            local b = new_balancer()
+            assert.is_false(b:getStatus().healthy)
+            assert(b:addAddress(b.targets[1], {address="127.0.0.1"}))
+            assert.is_true(b:getStatus().healthy)
+          end)
+
+          it("removing last address marks unhealthy", function()
+            local b = new_balancer({"127.0.0.1"})
+            assert.is_true(b:getStatus().healthy)
+            local target = b.targets[1]
+            b:disableAddress(target, {address="127.0.0.1"})
+            assert.is_false(b:getStatus().healthy)
+          end)
+
+          it("dropping below the health threshold marks unhealthy", function()
+            local b = new_balancer({ "127.0.0.1", "127.0.0.2", "127.0.0.3" })
+            b.healthThreshold = 50
+            assert.is_true(b:getStatus().healthy)
+
+            local addresses = b.targets[1].addresses
+            b:setAddressStatus(addresses[1], false)
+            assert.is_true(b:getStatus().healthy)
+
+            b:setAddressStatus(addresses[2], false)
+            assert.is_false(b:getStatus().healthy)
+
+            -- rising above threshold maks healthy again
+            b:setAddressStatus(addresses[1], true)
+            assert.is_true(b:getStatus().healthy)
+          end)
+        end)
+
+
+        describe("weights", function()
+          describe("(A)", function()
+
+            it("basic status", function()
+              local b = new_balancer({ { address = "127.0.0.1", port = 8000 } })
+              balancers.getAddressPeer(b.targets[1].addresses[1])
+              assert.same({
+                healthy = true,
+                weight = {
+                  total = 100,
+                  available = 100,
+                  unavailable = 0
+                },
+                hosts = {
+                  {
+                    host = "127.0.0.1",
+                    port = 8000,
+                    dns = "A",
+                    nodeWeight = 100,
+                    weight = {
+                      total = 100,
+                      available = 100,
+                      unavailable = 0
+                    },
+                    addresses = {
+                      {
+                        healthy = true,
+                        ip = "127.0.0.1",
+                        port = 8000,
+                        weight = 100
+                      },
+                    },
+                  },
+                },
+              }, b:getStatus())
+
+            end)
+
+            it("switching availability", function()
+              dnsA({
+                { name = "arecord.tst", address = "1.2.3.4" },
+                { name = "arecord.tst", address = "5.6.7.8" },
+              })
+              local b = new_balancer({
+                { address = "127.0.0.1", port = 8000 },
+                { address = "arecord.tst", port = 8001, weight = 25}
+              })
+              for _, addr in ipairs(b.targets[1].addresses) do
+                balancers.getAddressPeer(addr)
+              end
+              --balancers.getAddressPeer(b.targets[1].addresses[1])
+              --assert.same({
+              --  healthy = true,
+              --  weight = {
+              --    total = 100,
+              --    available = 100,
+              --    unavailable = 0
+              --  },
+              --  hosts = {
+              --    {
+              --      host = "127.0.0.1",
+              --      port = 8000,
+              --      dns = "A",
+              --      nodeWeight = 100,
+              --      weight = {
+              --        total = 100,
+              --        available = 100,
+              --        unavailable = 0
+              --      },
+              --      addresses = {
+              --        {
+              --          healthy = true,
+              --          ip = "127.0.0.1",
+              --          port = 8000,
+              --          weight = 100
+              --        },
+              --      },
+              --    },
+              --  },
+              --}, b:getStatus())
+
+              assert.same({
+                healthy = true,
+                weight = {
+                  total = 150,
+                  available = 150,
+                  unavailable = 0
+                },
+                hosts = {
+                  {
+                    host = "127.0.0.1",
+                    port = 8000,
+                    dns = "A",
+                    nodeWeight = 100,
+                    weight = {
+                      total = 100,
+                      available = 100,
+                      unavailable = 0
+                    },
+                    addresses = {
+                      {
+                        healthy = true,
+                        ip = "127.0.0.1",
+                        port = 8000,
+                        weight = 100
+                      },
+                    },
+                  },
+                  {
+                    host = "arecord.tst",
+                    port = 8001,
+                    dns = "A",
+                    nodeWeight = 25,
+                    weight = {
+                      total = 50,
+                      available = 50,
+                      unavailable = 0
+                    },
+                    addresses = {
+                      {
+                        healthy = true,
+                        ip = "1.2.3.4",
+                        port = 8001,
+                        weight = 25
+                      },
+                      {
+                        healthy = true,
+                        ip = "5.6.7.8",
+                        port = 8001,
+                        weight = 25
+                      },
+                    },
+                  },
+                },
+              }, b:getStatus())
+              b:setAddressStatus(b.targets[1].addresses[1], false)
+
+            end)
+          end)
+        end)
+      end)
+
+    end
 
   end)
 end
