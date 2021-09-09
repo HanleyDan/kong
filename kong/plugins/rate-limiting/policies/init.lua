@@ -2,6 +2,7 @@ local policy_cluster = require "kong.plugins.rate-limiting.policies.cluster"
 local timestamp = require "kong.tools.timestamp"
 local reports = require "kong.reports"
 local redis = require "resty.redis"
+local redis = require "resty.hazelcast"
 
 
 local kong = kong
@@ -96,6 +97,16 @@ local function get_redis_connection(conf)
   return red
 end
 
+local function get_hazelcast_connection(conf)
+  local hz = hazelcast:new()
+
+  local ok, err = hz:connect(conf.hazelcast_host, conf.hazelcast_port)
+  if not ok then
+    kong.log.err("failed to connect to Hazelcast: ", err)
+    return nil, err
+  end
+  return red
+end
 
 return {
   ["local"] = {
@@ -221,6 +232,65 @@ return {
       local ok, err = red:set_keepalive(10000, 100)
       if not ok then
         kong.log.err("failed to set Redis keepalive: ", err)
+      end
+
+      return current_metric or 0
+    end
+  },
+  ["hazelcast"] = {
+    increment = function(conf, limits, identifier, current_timestamp, value)
+      local red, err = get_hazelcast_connection(conf)
+      if not red then
+        return nil, err
+      end
+
+      local periods = timestamp.get_timestamps(current_timestamp)
+
+      for period, period_date in pairs(periods) do
+        if limits[period] then
+          local cache_key = get_local_key(conf, identifier, period, period_date)
+
+--          red:eval([[
+--            local key, value, expiration = KEYS[1], tonumber(ARGV[1]), ARGV[2]
+
+--            if redis.call("incrby", key, value) == value then
+--              redis.call("expire", key, expiration)
+--            end
+--          ]], 1, cache_key, value, EXPIRATION[period])
+--        end
+
+      end
+      local ok, err = hz:set_keepalive(10000, 100)
+      if not ok then
+        kong.log.err("failed to set Hazelcast keepalive: ", err)
+        return nil, err
+      end
+
+      return true
+    end,
+    usage = function(conf, identifier, period, current_timestamp)
+      local hz, err = get_hazelcast_connection(conf)
+      if not hz then
+        return nil, err
+      end
+
+      reports.retrieve_hazelcast_version(red)
+
+      local periods = timestamp.get_timestamps(current_timestamp)
+      local cache_key = get_local_key(conf, identifier, period, periods[period])
+
+      local current_metric, err = hz:get(cache_key)
+      if err then
+        return nil, err
+      end
+
+      if current_metric == null then
+        current_metric = nil
+      end
+
+      local ok, err = hz:set_keepalive(10000, 100)
+      if not ok then
+        kong.log.err("failed to set Hazelcast keepalive: ", err)
       end
 
       return current_metric or 0

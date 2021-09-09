@@ -42,6 +42,7 @@ if is_dbless() then
     one_of = {
       "local",
       "redis",
+      "hazelcast",
     },
   }
 
@@ -54,6 +55,7 @@ else
       "local",
       "cluster",
       "redis",
+      "hazelcast",
     },
   }
 end
@@ -86,6 +88,8 @@ return {
           { redis_password = { type = "string", len_min = 0 }, },
           { redis_timeout = { type = "number", default = 2000, }, },
           { redis_database = { type = "integer", default = 0 }, },
+          { hazelcast_host = typedefs.host },
+          { hazelcast_port = typedefs.port({ default = 5701 }), },
           { hide_client_headers = { type = "boolean", required = true, default = false }, },
         },
         custom_validator = validate_periods_order,
@@ -113,6 +117,14 @@ return {
     { conditional = {
       if_field = "config.policy", if_match = { eq = "redis" },
       then_field = "config.redis_timeout", then_match = { required = true },
+    } },
+    { conditional = {
+      if_field = "config.policy", if_match = { eq = "hazelcast" },
+      then_field = "config.hazelcast_host", then_match = { required = true },
+    } },
+    { conditional = {
+      if_field = "config.policy", if_match = { eq = "hazelcast" },
+      then_field = "config.hazelcast_host", then_match = { required = true },
     } },
   },
 }
