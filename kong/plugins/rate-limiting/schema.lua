@@ -34,6 +34,7 @@ end
 
 
 local policy
+kong.log.err("MODFIED RATE LIMITING ")
 if is_dbless() then
   policy = {
     type = "string",
@@ -124,7 +125,7 @@ return {
     } },
     { conditional = {
       if_field = "config.policy", if_match = { eq = "hazelcast" },
-      then_field = "config.hazelcast_host", then_match = { required = true },
+      then_field = "config.hazelcast_port", then_match = { required = true },
     } },
   },
 }
